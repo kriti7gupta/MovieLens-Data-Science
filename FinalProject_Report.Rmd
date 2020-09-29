@@ -1,0 +1,404 @@
+---
+title: "FinalProject_Report"
+author: "Kriti Gupta"
+date: "29/09/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, echo = FALSE, error= FALSE, message = FALSE)
+```
+
+# Introduction
+The purpose for this project is creating a recommender system using MovieLens dataset. 
+
+The version of movielens dataset used for this final assignment contains approximately 10 Milions of movies ratings, divided in 9 Milions for training and one Milion for validation. It is a small subset of a much larger (and famous) dataset with several millions of ratings.
+After a initial data exploration, the recommender systems builted on this dataset are evaluated and choosen based on the RMSE - Root Mean Squared Error that should be at least lower than **0.89999**.
+
+## 1. Installing essential packages
+
+First the working envrionment is set up by installing essential packages:
+
+# Install all needed libraries if it is not present
+```{r loading_library, eval=FALSE, echo=TRUE}
+
+if(!require(tidyverse)) install.packages("tidyverse") 
+if(!require(kableExtra)) install.packages("kableExtra")
+if(!require(tidyr)) install.packages("tidyr")
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(stringr)) install.packages("stringr")
+if(!require(forcats)) install.packages("forcats")
+if(!require(ggplot2)) install.packages("ggplot2")
+if(!require(data.table)) install.packages("data.table")
+
+```
+
+# Loading all needed libraries
+```{r loading_libraries, echo=TRUE}
+
+library(dplyr)
+library(tidyverse)
+library(kableExtra)
+library(tidyr)
+library(stringr)
+library(forcats)
+library(ggplot2)
+library(lubridate)
+library(caret)
+library(tinytex)
+library(data.table)
+```
+## 2. Data downloading and preparation
+```{r dataset_downloading}
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+movielens <- left_join(ratings, movies, by = "movieId")
+```
+
+Now we split the MovieLens dataset into Training (*edx*) and Validation (*validation*) sets. The Validation set will be 10% of MovieLens data.
+
+
+```{r spliting_data}
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+## 3. Data exploration
+
+### 3.1 Overall profile of the dataset
+Let's first have a general overview of the dataset:
+
+```{r echo=TRUE}
+head(edx)
+```
+
+```{r}
+mean_ratings<-mean(edx$rating) #3.512465
+edx %>% ggplot(aes(rating))+
+  geom_histogram(binwidth=0.25)+
+  scale_x_continuous(breaks = seq(0.5,5,0.5))+
+  geom_vline(xintercept=mean_ratings,col="red",linetype="dashed")
+```
+
+We can see the overall distribution of all of the ratings. It is screwed to the right. All half stars are less frenquient than full stars. A red dased line of the overall average rating is also plotted here as a reference.
+
+```{r echo=TRUE, results="hide"}
+dim(edx) # 9000055       6
+n_distinct(edx$movieId) # 10677
+n_distinct(edx$title) # 10676: there might be movies of different IDs with the same title
+n_distinct(edx$userId) # 69878
+n_distinct(edx$movieId)*n_distinct(edx$userId) # 746087406
+n_distinct(edx$movieId)*n_distinct(edx$userId)/dim(edx)[1] # 83
+```
+
+### 3.2 Extracting age of movies
+```{r extracting_age, echo=TRUE}
+edx_1 <- edx %>% mutate(year_rated = year(as_datetime(timestamp)))
+# extract the release year of the movie
+# edx_1 has year_rated, year_released, age_at_rating, and titles without year information
+edx_1 <- edx_1 %>% mutate(title = str_replace(title,"^(.+)\\s\\((\\d{4})\\)$","\\1__\\2" )) %>% 
+  separate(title,c("title","year_released"),"__") %>%
+  select(-timestamp) 
+edx_1 <- edx_1 %>% mutate(age_at_rating= as.numeric(year_rated)-as.numeric(year_released))
+head(edx_1)
+```
+### 3.3 Important Plots
+Movies vs Users - Shows sparsity
+```{r}
+set.seed(1)
+random_users <- sample(unique(edx$userId), 100)
+edx %>% filter(userId %in% random_users) %>% 
+  select(userId, movieId, rating) %>%
+  mutate(rating = 1) %>%
+  spread(movieId, rating) %>% 
+  select(sample(ncol(.), 100)) %>% 
+  as.matrix() %>% t(.) %>%
+  image(1:100, 1:100,. , xlab="Movies", ylab="Users")
+abline(h=0:100+0.5, v=0:100+0.5, col = "grey")
+```
+
+ Ratings by Users
+ Plot number of ratings per movie
+```{r}
+edx %>%
+  count(movieId) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bins = 30, color = "black") +
+  scale_x_log10() +
+  xlab("Number of ratings") +
+  ylab("Number of movies") +
+  ggtitle("Number of ratings per movie")
+```
+
+Plot number of ratings given by users
+```{r}
+edx %>%
+  count(userId) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bins = 30, color = "black") +
+  scale_x_log10() +
+  xlab("Number of ratings") + 
+  ylab("Number of users") +
+  ggtitle("Number of ratings given by users")
+
+```
+Plot mean movie ratings given by users
+```{r}
+edx %>%
+  group_by(userId) %>%
+  filter(n() >= 100) %>%
+  summarize(b_u = mean(rating)) %>%
+  ggplot(aes(b_u)) +
+  geom_histogram(bins = 30, color = "black") +
+  xlab("Mean rating") +
+  ylab("Number of users") +
+  ggtitle("Mean movie ratings given by users") +
+  scale_x_discrete(limits = c(seq(0.5,5,0.5))) +
+  theme_light()
+```
+
+## 4. Analysis - Model Building and Evaluation
+
+## Define RMSE: residual mean squared error
+
+```{r echo=TRUE}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+```{r set_digits}
+options(digits=6)
+options(pillar.sigfig = 6)
+```
+## Model 1
+### Naive Mean-Baseline Model
+
+In the first model, just based on the ratings itself, to minimize the RMSE, the best prediction of ratings for each movie will be the overall average of all ratings. The average rating is mu = 3.51247, and the naive RMSE is 1.0612.
+
+
+```{r echo=TRUE}
+mu <- mean(edx$rating)
+mu
+naive_rmse <- RMSE(validation$rating, mu)
+naive_rmse
+rmse_results <- data_frame(Model = "Just the average", RMSE = naive_rmse)
+rmse_results
+```
+## Model 2
+### Modeling movie effects: adding b_i to represent average ranking for movie_i
+
+Since the intrinsic features of a movie could obviously affect the ratings of a movie, we add the bias of movie/item (b_i) to the model, i.e., for each movie, the average of the ratings on that specific movie will have a difference from the overall average rating of all movies. We can plot the distribution of the bias and calculate the RMSE of this model.
+
+```{r echo=TRUE}
+movie_avgs <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+movie_avgs %>% qplot(b_i, geom ="histogram", bins = 10, data = ., color = I("black"))
+predicted_ratings_2 <- mu + validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  pull(b_i)
+model_2_rmse <- RMSE(validation$rating,predicted_ratings_2) # 0.943909
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Model="Movie Effect Model",  
+                                     RMSE = model_2_rmse))
+rmse_results
+```
+
+Adding the movie bias successfully brought the RMSE to lower than 1.
+
+## Model 3
+### User effects: adding b_u to represent average ranking for user_u
+
+Similar to the movie effect, intrinsic features of a given user could also affect the ratings of a movie. We now further add the bias of user (b_u) to the movie effect model.
+
+```{r echo=TRUE}
+user_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+predicted_ratings_3 <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+model_3_rmse <- RMSE(validation$rating,predicted_ratings_3) # 0.865349
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Model="Movie + User Effects Model",  
+                                     RMSE = model_3_rmse))
+rmse_results
+
+```
+
+## Model 4 
+## regularization of movie effect
+### A) perform cross validation to determine the parameter lambda
+
+To train the parameter lambda, 10-fold cross validation is used here within only the *edx* set, because the *validation* set should not be used to train any parameter.
+
+```{r echo=TRUE}
+use 10-fold cross validation to pick a lambda for movie effects regularization
+split the data into 10 parts
+set.seed(2019)
+cv_splits <- caret::createFolds(edx$rating, k=10, returnTrain =TRUE)
+
+# define a matrix to store the results of cross validation
+rmses <- matrix(nrow=10,ncol=51)
+lambdas <- seq(0, 3, 0.1)
+
+# perform 10-fold cross validation to determine the optimal lambda
+for(k in 1:10) {
+  train_set <- edx[cv_splits[[k]],]
+  test_set <- edx[-cv_splits[[k]],]
+
+  # Make sure userId and movieId in test set are also in the train set
+  test_final <- test_set %>%
+    semi_join(train_set, by = "movieId") %>%
+    semi_join(train_set, by = "userId")
+
+  # Add rows removed from validation set back into edx set
+  removed <- anti_join(test_set, test_final)
+  train_final <- rbind(train_set, removed)
+
+  mu <- mean(train_final$rating)
+  just_the_sum <- train_final %>%
+    group_by(movieId) %>%
+    summarize(s = sum(rating - mu), n_i = n())
+
+  rmses[k,] <- sapply(lambdas, function(l){
+    predicted_ratings <- test_final %>%
+      left_join(just_the_sum, by='movieId') %>%
+      mutate(b_i = s/(n_i+l)) %>%
+      mutate(pred = mu + b_i) %>%
+      pull(pred)
+    return(RMSE(predicted_ratings, test_final$rating))
+  })
+}
+
+rmses
+rmses_cv <- colMeans(rmses)
+rmses_cv
+qplot(lambdas,rmses_cv)
+lambdas[which.min(rmses_cv)]   #2.2
+```
+We get lambda = 2.2
+
+# B) Model generation and prediction
+```{r echo=TRUE}
+lambda <- 2.2
+mu <- mean(edx$rating)
+movie_reg_avgs <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = sum(rating - mu)/(n()+lambda), n_i = n()) 
+predicted_ratings_4 <- validation %>% 
+  left_join(movie_reg_avgs, by = "movieId") %>%
+  mutate(pred = mu + b_i) %>%
+  pull(pred)
+model_4_rmse <- RMSE(predicted_ratings_4, validation$rating)   # 0.943852 not too much improved
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Model="Regularized Movie Effect Model",  
+                                     RMSE = model_4_rmse))
+rmse_results 
+```
+
+## Model 5
+### Regularization of both movie and user effects (use the same lambda for both movie and user effects)
+
+### 1. Perform cross validation to determine the parameter lambda
+```{r eval=FALSE, echo=TRUE}
+define a matrix to store the results of cross validation
+lambdas <- seq(4, 8, 0.1)
+rmses_2 <- matrix(nrow=10,ncol=length(lambdas))
+# perform 10-fold cross validation to determine the optimal lambda
+for(k in 1:10) {
+  train_set <- edx[cv_splits[[k]],]
+  test_set <- edx[-cv_splits[[k]],]
+
+  # Make sure userId and movieId in test set are also in the train set
+  test_final <- test_set %>%
+    semi_join(train_set, by = "movieId") %>%
+    semi_join(train_set, by = "userId")
+
+  # Add rows removed from validation set back into edx set
+  removed <- anti_join(test_set, test_final)
+  train_final <- rbind(train_set, removed)
+
+  mu <- mean(train_final$rating)
+
+  rmses_2[k,] <- sapply(lambdas, function(l){
+    b_i <- train_final %>%
+      group_by(movieId) %>%
+      summarize(b_i = sum(rating - mu)/(n()+l))
+    b_u <- train_final %>%
+      left_join(b_i, by="movieId") %>%
+      group_by(userId) %>%
+      summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+    predicted_ratings <-
+      test_final %>%
+      left_join(b_i, by = "movieId") %>%
+      left_join(b_u, by = "userId") %>%
+      mutate(pred = mu + b_i + b_u) %>%
+      pull(pred)
+    return(RMSE(predicted_ratings, test_final$rating))
+  })
+}
+rmses_2
+rmses_2_cv <- colMeans(rmses_2)
+rmses_2_cv
+qplot(lambdas,rmses_2_cv)
+lambda <- lambdas[which.min(rmses_2_cv)]   #4.9
+```
+
+### 2. Model generation and prediction
+
+Regularized Movie Effect and User Effect Model
+
+```{r}
+lambda <- 4.9
+```
+
+```{r echo=TRUE}
+mu <- mean(edx$rating)
+b_i_reg <- edx %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+lambda))
+b_u_reg <- edx %>% 
+    left_join(b_i_reg, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
+predicted_ratings_5 <- 
+    validation %>% 
+    left_join(b_i_reg, by = "movieId") %>%
+    left_join(b_u_reg, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+model_5_rmse <- RMSE(predicted_ratings_5, validation$rating)   # 0.864818
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(Model="Regularized Movie + User Effect Model",  
+                                     RMSE = model_5_rmse))
+rmse_results 
+```
+
+# Conclusion
+
+From the summarized RMSEs of different models, we can see that Regularization of Movie+User Model largely improved the accuracy of the prediction. 
+
+```{r}
+final_rmses <- rmse_results 
+final_rmses
+```
